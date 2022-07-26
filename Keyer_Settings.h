@@ -1,4 +1,5 @@
-#define Program_Version "CW UDP Keyer v1.0"   // 2021-11-03
+//#define Program_Version "CW UDP Keyer v1.0"   // 2021-11-03
+#define Program_Version "CW UDP Keyer v1.1"   // 2022-07-26
 
 
 #define LED1 12                                 //on board LED, high for on
