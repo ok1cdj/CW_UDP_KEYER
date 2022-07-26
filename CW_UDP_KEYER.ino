@@ -9,32 +9,26 @@
 //
 // When TTGO_T3_BOARD is     defined the Keyer will work with TTGO T7 v1.4 mini32 board (ESP32 with OLED display)
 // When TTGO_T3_BOARD is not defined the Keyer will work with hardware designed by OK1CDJ/OM2JU (ESP32 module, Monochrome OLED 128x64, SX1280 module)
-#define TTGO_T3_BOARD
+//#define TTGO_T3_BOARD
 
-// When USE_PADS_INSTEAD_OF_ROTARY_ENC defined the pads can be used to enter input data (no need for rotary encoder)
+// When we use TTGO_T3_BOARD we will use keyer pads to enter input data (instead of rotary encoder)
+// Left pad = down, rigth pad = up
+#ifdef TTGO_T3_BOARD
 #define USE_PADS_INSTEAD_OF_ROTARY_ENC
-
-
-#ifdef USE_PADS_INSTEAD_OF_ROTARY_ENC
 #define TTGO_BOARD_PUSH_LEFT  35
 #define TTGO_BOARD_PUSH_RIGHT 0
 #define ReadPushBtnVal()   pushBtnVal=digitalRead(TTGO_BOARD_PUSH_LEFT)
 #define WAIT_Push_Btn_Release(milisec)  delay(milisec);while(digitalRead(TTGO_BOARD_PUSH_LEFT)==0){}
-#else
-#define ReadPushBtnVal()   pushBtnVal=digitalRead(ROTARY_ENC_PUSH)
-#define WAIT_Push_Btn_Release(milisec)  delay(milisec);while(digitalRead(ROTARY_ENC_PUSH)==0){}
-#endif
-
-#ifdef TTGO_T3_BOARD
 #define KEYER_DOT       12    // Morse keyer DOT
 #define KEYER_DASH      13    // Morse keyer DASH
 #else
+#define ReadPushBtnVal()   pushBtnVal=digitalRead(ROTARY_ENC_PUSH)
+#define WAIT_Push_Btn_Release(milisec)  delay(milisec);while(digitalRead(ROTARY_ENC_PUSH)==0){}
 #define KEYER_DOT       34    // Morse keyer DOT          NOTE: GPIOs 34 to 39 INPUTs only / No internal pullup / No int. pulldown
 #define KEYER_DASH      35    // Morse keyer DASH
 #endif
 
-#define TIMER_PERIOD_USEC 2500     // 2.5 msec
-
+#define TIMER_PERIOD_USEC 3500     // 2500 = 2.5 msec, 3500 = 3.5 msec
 
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
@@ -91,7 +85,7 @@ AsyncUDP udp;
 QueueHandle_t queue;
 
 String ssid       = "";
-String ssid_ap    = "CW_UDP_KEYER";
+String ssid_ap    = "CW_UDP_KEYER_AP";
 String password   = "";
 String sRemote_ip  = "";
 String apikey     = "";
@@ -102,6 +96,10 @@ String sPrimaryDNS = "";
 String wifiNetworkList = "";
 String sSecondaryDNS = "";
 String spwr = "";
+
+IPAddress AP_IP      = IPAddress(192,168,4,4);
+IPAddress AP_gateway = IPAddress(192,168,4,4);
+IPAddress AP_subnet  = IPAddress(255,255,255,0);
 
 
 String message;
@@ -173,7 +171,7 @@ const uint32_t PowerArrayMiliWatt [][2] = {
   { 100, 4 },   // cca 100 mW
   { 200, 8 },   // cca 200 mW
   { 330, 11 },  // cca 300 mW
-  { 460, 13 }   // cca 460 mW
+  { 460, 13 }   // cca 460 mW       13+18 = 31  --> max value
 };
 //
 // Program states
@@ -242,6 +240,8 @@ uint32_t timeout_cnt = 0;
 uint8_t  keyerVal      = 1;
 uint8_t  pushBtnVal    = 1;
 uint8_t  pushBtnValR   = 1;
+uint8_t  pushBtnValL   = 1;
+uint8_t  sentCnt       = 0;
 uint8_t  keyerDotPressed = 0;
 uint8_t  keyerDashPressed = 0;
 uint8_t  keyerCWstarted = 0;
@@ -948,8 +948,18 @@ void loop()
       //
       break;
     //--------------------------------
+    #ifdef USE_PADS_INSTEAD_OF_ROTARY_ENC
     case S_CHANGE_FREQ_WITH_PADS:
-      // Update display with Frequency info when it has changed
+      // 
+      pushBtnValL = digitalRead(TTGO_BOARD_PUSH_LEFT);
+      if ((pushBtnValL == PUSH_BTN_PRESSED) && (sentCnt<10)) {
+        //delay(200);while(digitalRead(TTGO_BOARD_PUSH_LEFT)==0){};
+        //vTaskDelay(400);
+        morseSendUDP(eee_message_buf[0]);
+        vTaskDelay(10);
+        sentCnt++;
+      }      
+      // Update display with Frequency info when it has changed      
       if (RotaryEncISR.cntVal != RotaryEncISR.cntValOld) {
         limitRotaryEncISR_values();
         display_mainfield_begin(23);
@@ -965,7 +975,9 @@ void loop()
 //        display_status_bar();
         SendParamsUDPtoRemoteIP(RotaryEncISR.cntVal, RotaryEnc_KeyerSpeedWPM.cntVal, RotaryEnc_OutPowerMiliWatt.cntVal);
         RotaryEncPop(&RotaryEnc_FreqWord);  // Store in RotaryEnc_FreqWord, this is needed for case when Timeout occurs... 
+        sentCnt=0;
       }
+
       RotaryEncISR.cntValOld = RotaryEncISR.cntVal;
       // This has to be at very end since with RotaryEncPush we are making RotaryEncISR.cntValOld different from RotaryEncISR.cntVal
       #ifdef TTGO_T3_BOARD
@@ -988,6 +1000,7 @@ void loop()
         }
       #endif
       break;
+      #endif   // USE_PADS_INSTEAD_OF_ROTARY_ENC
     //--------------------------------
     case S_TOP_MENU_ITEMS:
       // Wrap aroud
@@ -1145,8 +1158,8 @@ void loop()
       for (int j = 0; (j < 3) && !stop; j++) {
         // CQ
         for (int i = 0; (i < sizeof(cq_message_buf)) && !stop; i++) {
+          morseSendUDP(cq_message_buf[i]);  // Send UDP upfront, then play
           morseEncode (cq_message_buf[i]);
-          morseSendUDP(cq_message_buf[i]);
           timeout_cnt = 0; // do not allow to timeout this operation
           ReadPushBtnVal();
           if (pushBtnVal == PUSH_BTN_PRESSED) {
@@ -1155,8 +1168,8 @@ void loop()
         }
         // My Call
         for (int i = 0; (i < s_mycall_ascii_buf.length()) && !stop; i++) {
-          morseEncode (s_mycall_ascii_buf[i]);
           morseSendUDP(s_mycall_ascii_buf[i]);
+          morseEncode (s_mycall_ascii_buf[i]);
           timeout_cnt = 0; // do not allow to timeout this operation
           ReadPushBtnVal();
           if (pushBtnVal == PUSH_BTN_PRESSED) {
@@ -1164,12 +1177,12 @@ void loop()
           }
         }
         //
-        morseEncode (' ');
         morseSendUDP(' ');
+        morseEncode (' ');
         // My Call
         for (int i = 0; (i < s_mycall_ascii_buf.length()) && !stop; i++) {
-          morseEncode (s_mycall_ascii_buf[i]);
           morseSendUDP(s_mycall_ascii_buf[i]);
+          morseEncode (s_mycall_ascii_buf[i]);
           timeout_cnt = 0; // do not allow to timeout this operation
           ReadPushBtnVal();
           if (pushBtnVal == PUSH_BTN_PRESSED) {
@@ -1179,8 +1192,8 @@ void loop()
       } // j
       // +K
       for (int i = 0; (i < sizeof(cq_message_end_buf)) && !stop; i++) {
-        morseEncode (cq_message_end_buf[i]);
         morseSendUDP(cq_message_end_buf[i]);
+        morseEncode (cq_message_end_buf[i]);
         timeout_cnt = 0; // do not allow to timeout this operation
         ReadPushBtnVal();
         if (pushBtnVal == PUSH_BTN_PRESSED) {
@@ -1452,19 +1465,17 @@ void IRAM_ATTR onTimer() {
   // SW debounce
   rotaryA_Val = (rotaryA_Val << 1 | (uint8_t)digitalRead(ROTARY_ENC_A)) & 0x0F;
   //
-  // Rising edge --> 0001
-  if (rotaryA_Val == 0x01) {
+  // Detecting edge --> 1110
+  if (rotaryA_Val == 0x0E) {
     rotaryB_Val = digitalRead(ROTARY_ENC_B);
     // Rotation speedup
     (ISR_cnt <= 12) ? cntIncrISR = RotaryEncISR.cntIncr << 4 : cntIncrISR = RotaryEncISR.cntIncr;
     ISR_cnt = 0;
     //
     if (rotaryB_Val == 0) {
-      RotaryEncISR.cntVal += cntIncrISR;
-      //RotaryEncISR.cntVal = RotaryEncISR.cntVal + cntIncrISR;
-    } else {
       RotaryEncISR.cntVal -= cntIncrISR;
-      //RotaryEncISR.cntVal = RotaryEncISR.cntVal - cntIncrISR;
+    } else {
+      RotaryEncISR.cntVal += cntIncrISR;
     }
   }
   #endif
@@ -1681,10 +1692,14 @@ void setup() {
 if (wifiConfigRequired) {
 
     wifiConfigRequired = true;
-    Serial.println("Start AP");
+    //Serial.println("Start AP");
     Serial.printf("WiFi is not connected or configured. Starting AP mode\n");
-    //ssid_ap = "CW_UDP_KEYER";   // ### Already defined
+    //ssid_ap = "CW_UDP_KEYER_AP";   // ### Already defined
+    WiFi.mode(WIFI_AP);  
     WiFi.softAP(ssid_ap.c_str());
+    delay(100);
+    WiFi.softAPConfig(AP_IP, AP_gateway, AP_subnet);
+    delay(100);
     IP = WiFi.softAPIP();
     wifiSoftAP = true;
     Serial.printf("SSID: %s, IP: ", ssid_ap.c_str());
