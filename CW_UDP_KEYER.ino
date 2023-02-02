@@ -9,7 +9,7 @@
 //
 // When TTGO_T3_BOARD is     defined the Keyer will work with TTGO T7 v1.4 mini32 board (ESP32 with OLED display)
 // When TTGO_T3_BOARD is not defined the Keyer will work with hardware designed by OK1CDJ/OM2JU (ESP32 module, Monochrome OLED 128x64, SX1280 module)
-//#define TTGO_T3_BOARD
+#define TTGO_T3_BOARD
 
 // When we use TTGO_T3_BOARD we will use keyer pads to enter input data (instead of rotary encoder)
 // Left pad = down, rigth pad = up
@@ -238,12 +238,16 @@ uint32_t loopCnt = 0;
 uint32_t menuIndex;
 uint32_t timeout_cnt = 0;
 uint8_t  keyerVal      = 1;
+uint8_t  squeezedFlag  = 0;  // paddles squeezed flag
+uint8_t  iambicBfinishFlag  = 0;
+
+#define DOT  0
+#define DASH 1
+uint8_t  lastPlayedPad = DOT;
 uint8_t  pushBtnVal    = 1;
 uint8_t  pushBtnValR   = 1;
 uint8_t  pushBtnValL   = 1;
 uint8_t  sentCnt       = 0;
-uint8_t  keyerDotPressed = 0;
-uint8_t  keyerDashPressed = 0;
 uint8_t  keyerCWstarted = 0;
 uint8_t  pushBtnPressed = 0;
 uint8_t stop = 0;
@@ -290,6 +294,7 @@ AsyncUDPMessage AsyncUDPmsg;
 uint32_t FreqWord = 0;
 uint32_t FreqWordNoOffset = 0;
 uint32_t WPM_dot_delay;
+uint32_t WPM_dash_delay;
 
 char   freq_ascii_buf[20];   // Buffer for formatting of FREQ value
 char   general_ascii_buf[40];
@@ -405,11 +410,15 @@ void display_status_bar () {
   display.setCursor(3*MY_SCALE, 2*MY_SCALE); // 7 is the font height
   display.print(s_mycall_ascii_buf);
   display.setCursor(52*MY_SCALE, 2*MY_SCALE); // 7 is the font height
-  if (RotaryEnc_KeyerType.cntVal & 0x00000001) {
+  if ((RotaryEnc_KeyerType.cntVal) == 1) {
     display.print("Strgh,");
   } else {
     display.print(RotaryEnc_KeyerSpeedWPM.cntVal);
-    display.print("wpm,");
+    if ((RotaryEnc_KeyerType.cntVal) == 0) {
+      display.print("wpA,");
+    } else {
+      display.print("wpB,");
+    }
   }
   display.print(PowerArrayMiliWatt[RotaryEnc_OutPowerMiliWatt.cntVal][0]);
   display.print("mW");
@@ -434,7 +443,8 @@ void limitRotaryEncISR_values() {
 
 // Calculate duration of DOT from WPM
 void Calc_WPM_dot_delay ( uint32_t wpm) {
-  WPM_dot_delay = (uint32_t) (double(1200.0) / (double) wpm);
+  WPM_dot_delay  = (uint32_t) (double(1200.0) / (double) wpm);
+  WPM_dash_delay = WPM_dot_delay+WPM_dot_delay+WPM_dot_delay;
 }
 
 void SendParamsUDPtoRemoteIP(int32_t freq, int32_t wpm, int32_t pwr) {
@@ -694,12 +704,29 @@ void messageQueueSend() {
 }
 
 
+uint8_t wpm_delay_and_paddle_check (uint32_t delay_ms, uint8_t squeezedFlag, uint8_t return_val_when_released) {
+  uint8_t return_val = 0;
+  // delay WPM_dot_delay with checking if paddles released
+  delay(3);  
+  for(uint32_t d=3;d<delay_ms;d++) {
+    delay(1);  
+    if (RotaryEnc_KeyerType.cntVal == 2) {  // if Iambic-B keyer is configured
+      keyerVal = digitalRead(KEYER_DASH) << 1 | digitalRead(KEYER_DOT);
+      if (keyerVal==0x03) { return_val = return_val_when_released;}  // if during dot/dash playing both keyers released then play additional dash
+    }
+  }
+  return squeezedFlag ? return_val : 0;
+}
+
+#define PADS_NOT_SQUEEZED 0
+#define PADS_SQUEEZED 1
+
 void loop()
 {
   //-----------------------------------------
   if (keyerEnabled == true) {
   // -- Straight keyer
-  if (RotaryEnc_KeyerType.cntVal & 0x00000001) {
+  if (RotaryEnc_KeyerType.cntVal == 1) {     //  1 = Straight
     keyerVal = digitalRead(KEYER_DOT);
     // Keyer pressed
     if (keyerVal == 0)  {
@@ -718,35 +745,64 @@ void loop()
     }
   } else {
     // -- Iambic keywer
-    // Keyer pressed DOT
     keyerVal   = digitalRead(KEYER_DASH) << 1 | digitalRead(KEYER_DOT);
-    if (((keyerVal & 0x01) == 0) || (keyerDotPressed == 1)) {
+    switch(keyerVal) {
+      case 0x02:   // DOT
+        udp_sending_enabled = true;
+        startCW();
+        //delay(WPM_dot_delay);
+        // here we set iambicBfinishFlag to 0 by passing PADS_NOT_SQUEEZED to function
+        iambicBfinishFlag = wpm_delay_and_paddle_check(WPM_dot_delay, PADS_NOT_SQUEEZED, 0); // delay WPM_dot_delay with checking if paddles released
+        stopCW();
+        iambicBfinishFlag = wpm_delay_and_paddle_check(WPM_dot_delay, PADS_NOT_SQUEEZED, 0);
+        lastPlayedPad = DOT;
+      break;
+      case 0x01:   // DASH
+        udp_sending_enabled = true;
+        startCW();
+        // here we set iambicBfinishFlag to 0 by passing PADS_NOT_SQUEEZED to function
+        iambicBfinishFlag = wpm_delay_and_paddle_check(WPM_dash_delay, PADS_NOT_SQUEEZED, 0);
+        stopCW();
+        iambicBfinishFlag = wpm_delay_and_paddle_check(WPM_dot_delay, PADS_NOT_SQUEEZED, 0);  
+        lastPlayedPad = DASH;
+      break;
+      case 0x00:   // SQUEEZED = BOTH Paddles pressed
+        udp_sending_enabled = true;
+        startCW();
+        if (lastPlayedPad == DOT) {
+          iambicBfinishFlag  = wpm_delay_and_paddle_check(WPM_dash_delay, PADS_SQUEEZED, 1);
+          stopCW();
+          iambicBfinishFlag += wpm_delay_and_paddle_check(WPM_dot_delay, PADS_SQUEEZED, 1);
+          lastPlayedPad = DASH;
+          // here iambicBfinishFlag will have max 4
+        } else {
+          iambicBfinishFlag = wpm_delay_and_paddle_check(WPM_dot_delay, PADS_SQUEEZED, 10);
+          stopCW();
+          iambicBfinishFlag += wpm_delay_and_paddle_check(WPM_dot_delay, PADS_SQUEEZED, 10);
+          lastPlayedPad = DOT;
+          // here iambicBfinishFlag will have max 20
+        }
+      break;
+      case 0x03:    // No paddle pressed = no action
+      break;
+      default:
+      break;
+    }
+    //
+    // For Iambic-B keyer play finishing dot or dash if keys released 
+    if (iambicBfinishFlag > 0) {
       udp_sending_enabled = true;
       startCW();
       delay(WPM_dot_delay);
+      if (iambicBfinishFlag >= 10) {  // play DOT
+        delay(WPM_dot_delay);
+        delay(WPM_dot_delay);
+      }
       stopCW();
-      //delay(WPM_dot_delay>>1);
-      //((keyerVal & 0x01) == 0) ? keyerDotPressed  = 1 : keyerDotPressed = 0;
-      //((keyerVal & 0x02) == 0) ? keyerDashPressed = 1 : keyerDashPressed = 0;
-      //delay(WPM_dot_delay>>1);
       delay(WPM_dot_delay);
+      iambicBfinishFlag=0;
     }
-    // Keyer pressed DASH
-    keyerVal   = digitalRead(KEYER_DASH) << 1 | digitalRead(KEYER_DOT);
-    if (((keyerVal & 0x02) == 0) || (keyerDashPressed == 1)) {
-      udp_sending_enabled = true;
-      startCW();
-      delay(WPM_dot_delay);
-      delay(WPM_dot_delay);
-      delay(WPM_dot_delay);
-      stopCW();
-      //delay(WPM_dot_delay>>1);
-      //((keyerVal & 0x01) == 0) ? keyerDotPressed  = 1 : keyerDotPressed = 0;
-      //((keyerVal & 0x02) == 0) ? keyerDashPressed = 1 : keyerDashPressed = 0;
-      //delay(WPM_dot_delay>>1);
-      delay(WPM_dot_delay);
-    }
-  }
+  }  // end else iambickeyer
   } // end keyerEnabled
   //
    // Process timeout for display items other than main screen
@@ -1233,9 +1289,22 @@ void loop()
     //--------------------------------
     case S_SET_KEYER_TYPE:
       if (RotaryEncISR.cntVal != RotaryEncISR.cntValOld) {
+        RotaryEncISR.cntVal = RotaryEncISR.cntVal % 3;  // limit values to 0-2 / 0 = Iambic-A, 1 = Straight, 2 = Iambic-B
         timeout_cnt = 0;
         display_valuefield_begin();
-        display.print(RotaryEncISR.cntVal % 2 ?  "Straight  " : "Iambic    ");
+        switch(RotaryEncISR.cntVal) {
+          case 0:
+            display.print("Iambic A  ");
+          break;
+          case 1:
+            display.print("Straight  ");
+          break;
+          case 2:
+            display.print("Iambic B  ");
+          break;
+          default:
+          break;
+        }
         display_display();
       }
       RotaryEncISR.cntValOld = RotaryEncISR.cntVal;
